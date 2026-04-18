@@ -1,0 +1,10 @@
+[traps.euler_bad_debt_trap]
+path                    = "out/EulerFinanceTrap.sol/EulerFinanceTrap.json"
+response_contract       = "0x0000000000000000000000000000000000000000"
+response_function       = "respond(bytes)"
+block_sample_size       = 5
+cooldown_period_blocks  = 10
+min_number_of_operators = 2
+max_number_of_operators = 10
+private_trap            = false
+whitelist               = []
