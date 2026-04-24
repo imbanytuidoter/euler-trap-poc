@@ -16,7 +16,6 @@ contract MockEulerMarket is IEulerMarket {
 
     mapping(address => Position) public positions;
 
-    uint256 private _totalDeposits;
     uint256 private _totalBorrows;
     uint256 private _totalReserves;
     bool    private _paused;
@@ -42,7 +41,6 @@ contract MockEulerMarket is IEulerMarket {
     function deposit(uint256 amount) external notPaused {
         require(amount > 0, "zero deposit");
         positions[msg.sender].eTokens += amount;
-        _totalDeposits += amount;
         emit Deposit(msg.sender, amount);
     }
 
@@ -61,7 +59,6 @@ contract MockEulerMarket is IEulerMarket {
     function mint(uint256 eAmount, uint256 dAmount) external notPaused {
         require(eAmount > 0 || dAmount > 0, "zero mint");
         positions[msg.sender].eTokens += eAmount;
-        _totalDeposits += eAmount;
         positions[msg.sender].dTokens += dAmount;
         _totalBorrows += dAmount;
         (uint256 col, uint256 liab) = _accountLiquidity(msg.sender);
@@ -77,11 +74,9 @@ contract MockEulerMarket is IEulerMarket {
         require(amount > 0, "zero donation");
         require(positions[msg.sender].eTokens >= amount, "MockEuler: insufficient eTokens");
 
-        // Collateral drops — Trap signal emerges from this line
         positions[msg.sender].eTokens -= amount;
-        _totalDeposits -= amount;
 
-        // Reserves spike — Trap signal #2
+        // Reserves spike — Trap signal
         _totalReserves += amount;
 
         // NO solvency check — this is the bug
