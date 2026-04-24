@@ -69,7 +69,6 @@ contract EulerTrapDetection is Test {
                 totalBadDebt  : 0,
                 totalReserves : 0,
                 totalBorrows  : 30 * ONE_M,
-                totalDeposits : 50 * ONE_M,
                 blockNumber   : block.number - 5
             })
         );
@@ -139,7 +138,6 @@ contract EulerTrapDetection is Test {
                 totalBadDebt  : 0,
                 totalReserves : 5 * ONE_M,
                 totalBorrows  : 30 * ONE_M,
-                totalDeposits : 50 * ONE_M,
                 blockNumber   : block.number - 3
             })
         );

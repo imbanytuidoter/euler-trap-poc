@@ -116,7 +116,6 @@ contract MockEulerMarket is IEulerMarket {
     }
 
     function totalBorrows() external view override returns (uint256) { return _totalBorrows; }
-    function totalDeposits() external view override returns (uint256) { return _totalDeposits; }
     function totalReserves() external view override returns (uint256) { return _totalReserves; }
     function paused() external view override returns (bool) { return _paused; }
 

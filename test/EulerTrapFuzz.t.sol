@@ -50,7 +50,6 @@ contract EulerTrapFuzz is Test {
                 totalBadDebt  : 0,
                 totalReserves : 0,
                 totalBorrows  : 30 * ONE_M,
-                totalDeposits : 50 * ONE_M,
                 blockNumber   : block.number - 5
             })
         );
@@ -127,7 +126,6 @@ contract EulerTrapFuzz is Test {
                 totalBadDebt  : 0,
                 totalReserves : existingReserves,
                 totalBorrows  : 30 * ONE_M,
-                totalDeposits : 50 * ONE_M,
                 blockNumber   : block.number - 5
             })
         );
@@ -172,7 +170,6 @@ contract EulerTrapFuzz is Test {
                 totalBadDebt  : 0,
                 totalReserves : 0,
                 totalBorrows  : 30 * ONE_M,
-                totalDeposits : 50 * ONE_M,
                 blockNumber   : block.number - 1
             })
         );

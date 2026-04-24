@@ -41,7 +41,6 @@ contract EulerFinanceTrap is Trap {
         uint256 totalBadDebt;
         uint256 totalReserves;
         uint256 totalBorrows;
-        uint256 totalDeposits;
         uint256 blockNumber;
     }
 
@@ -54,7 +53,6 @@ contract EulerFinanceTrap is Trap {
         uint256 badDebt;
         uint256 reserves;
         uint256 borrows;
-        uint256 deposits;
 
         // [TRAP LINE A] donateToReserves() → eTokens drop → liab > col
         // → getTotalBadDebt() returns non-zero → primary detection signal
@@ -64,13 +62,11 @@ contract EulerFinanceTrap is Trap {
 
         try market.totalReserves() returns (uint256 r) { reserves = r; } catch {}
         try market.totalBorrows()  returns (uint256 b) { borrows  = b; } catch {}
-        try market.totalDeposits() returns (uint256 d) { deposits = d; } catch {}
 
         return abi.encode(CollectOutput({
             totalBadDebt  : badDebt,
             totalReserves : reserves,
             totalBorrows  : borrows,
-            totalDeposits : deposits,
             blockNumber   : block.number
         }));
     }
