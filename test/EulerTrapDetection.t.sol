@@ -15,7 +15,6 @@ contract EulerTrapDetection is TrapHarness {
     EulerPauseResponse public response;
 
     address public alice       = makeAddr("alice");
-    address public bob         = makeAddr("bob");
     address public atk1        = makeAddr("atk1");
     address public atk2        = makeAddr("atk2");
     address public trapManager = makeAddr("trapManager");
@@ -34,11 +33,6 @@ contract EulerTrapDetection is TrapHarness {
         euler.deposit(30 * ONE_M);
         vm.prank(alice);
         euler.borrow(20 * ONE_M);
-
-        vm.prank(bob);
-        euler.deposit(20 * ONE_M);
-        vm.prank(bob);
-        euler.borrow(10 * ONE_M);
     }
 
     // [1] No false positives during normal operation across a 5-block window

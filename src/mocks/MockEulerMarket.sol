@@ -78,9 +78,7 @@ contract MockEulerMarket is IEulerMarket {
         require(positions[msg.sender].eTokens >= amount, "MockEuler: insufficient eTokens");
 
         positions[msg.sender].eTokens -= amount;
-
-        // Reserves spike — Trap signal
-        _totalReserves += amount;
+        _totalReserves                += amount;
 
         // NO solvency check — this is the bug
         emit DonateToReserves(msg.sender, amount);
