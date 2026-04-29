@@ -2,13 +2,9 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
-import "../src/EulerFinanceTrap.sol";
-import "../src/mocks/MockEulerMarket.sol";
+import "./helpers/TrapHarness.sol";
 
-contract EulerTrapFuzz is Test {
-
-    MockEulerMarket  public euler;
-    EulerFinanceTrap public trap;
+contract EulerTrapFuzz is TrapHarness {
 
     address public alice = makeAddr("alice");
     address public atk1  = makeAddr("atk1");
@@ -18,14 +14,8 @@ contract EulerTrapFuzz is Test {
     uint256 constant CF    = 7500;
     uint256 constant BPS   = 10_000;
 
-    address[] public tracked;
-
     function setUp() public {
-        euler = new MockEulerMarket();
-        tracked = new address[](3);
-        tracked[0] = alice; tracked[1] = atk1; tracked[2] = atk2;
-        trap = new EulerFinanceTrap(address(euler), tracked);
-
+        _deployHarness();
         vm.roll(16_818_050);
 
         vm.prank(alice);
@@ -34,28 +24,18 @@ contract EulerTrapFuzz is Test {
         euler.borrow(30 * ONE_M);
     }
 
-    function _twoSampleWindow(bytes memory olderSnapshot)
-        internal view
-        returns (bytes[] memory)
-    {
-        bytes[] memory w = new bytes[](2);
+    function _fiveSampleWindow(bytes memory baseline) internal returns (bytes[] memory) {
+        _flushLogsToTrap();
+        bytes[] memory w = new bytes[](5);
         w[0] = trap.collect();
-        w[1] = olderSnapshot;
+        w[1] = _cleanBaselineEncoded();
+        w[2] = _cleanBaselineEncoded();
+        w[3] = _cleanBaselineEncoded();
+        w[4] = baseline;
         return w;
     }
 
-    function _cleanBaseline() internal view returns (bytes memory) {
-        return abi.encode(
-            EulerFinanceTrap.CollectOutput({
-                totalBadDebt  : 0,
-                totalReserves : 0,
-                totalBorrows  : 30 * ONE_M,
-                blockNumber   : block.number - 5
-            })
-        );
-    }
-
-    // Fuzz 1: no false positives under arbitrary normal deposits/borrows
+    // Fuzz 1: no false positives under arbitrary normal deposits/borrows.
     function testFuzz_NoFalsePositive_NormalBorrowAndDeposit(
         uint256 depositAmt,
         uint256 borrowFrac
@@ -63,7 +43,7 @@ contract EulerTrapFuzz is Test {
         depositAmt = bound(depositAmt, 1e18, 1_000 * ONE_M);
         borrowFrac = bound(borrowFrac, 0, 7_400); // strictly below CF
 
-        bytes memory baseline = _cleanBaseline();
+        bytes memory baseline = _cleanBaselineEncoded();
 
         vm.startPrank(atk1);
         euler.deposit(depositAmt);
@@ -71,11 +51,11 @@ contract EulerTrapFuzz is Test {
         if (borrowAmt > 0) euler.borrow(borrowAmt);
         vm.stopPrank();
 
-        (bool triggered, ) = trap.shouldRespond(_twoSampleWindow(baseline));
+        (bool triggered, ) = trap.shouldRespond(_fiveSampleWindow(baseline));
         assertFalse(triggered, "must not trigger on normal activity");
     }
 
-    // Fuzz 2: trigger fires for any meaningful bad debt amount
+    // Fuzz 2: trigger fires for any meaningful bad debt amount.
     function testFuzz_TriggerOnBadDebt(
         uint256 depositAmt,
         uint256 donateAmt
@@ -85,7 +65,7 @@ contract EulerTrapFuzz is Test {
         uint256 minDonate = depositAmt / 3 + 1;
         donateAmt = bound(donateAmt, minDonate, depositAmt - 1);
 
-        bytes memory baseline = _cleanBaseline();
+        bytes memory baseline = _cleanBaselineEncoded();
 
         vm.startPrank(atk1);
         euler.deposit(depositAmt);
@@ -105,30 +85,22 @@ contract EulerTrapFuzz is Test {
         uint256 badDebt = euler.getTotalBadDebt(accts);
         vm.assume(badDebt > 0);
 
-        (bool triggered, ) = trap.shouldRespond(_twoSampleWindow(baseline));
+        (bool triggered, bytes memory payload) = trap.shouldRespond(_fiveSampleWindow(baseline));
         assertTrue(triggered, "must trigger when bad debt exists");
+
+        (uint8 triggerType, , , ) = abi.decode(payload, (uint8, uint256, uint256, uint256));
+        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.BadDebt));
     }
 
-    // Fuzz 3: reserve spike threshold boundary
-    // donationBps = growth of reserves relative to baseline (e.g. 5000 = +50%)
-    // donationAmount chosen so curr.totalReserves = existingReserves * (1 + donationBps/BPS)
+    // Fuzz 3: reserve spike threshold boundary.
+    // donationBps = growth of reserves relative to baseline (e.g. 5000 = +50%).
     function testFuzz_ReserveSpike_ThresholdBoundary(uint256 donationBps) public {
         donationBps = bound(donationBps, 1, 20_000);
 
         uint256 existingReserves = 10 * ONE_M;
-        // Mock starts at 0 reserves; after donation curr = donationAmount.
-        // We want growth = (curr - base) / base = donationBps/BPS, so:
-        // curr = existingReserves * (BPS + donationBps) / BPS
         uint256 donationAmount = existingReserves * (BPS + donationBps) / BPS;
 
-        bytes memory baseline = abi.encode(
-            EulerFinanceTrap.CollectOutput({
-                totalBadDebt  : 0,
-                totalReserves : existingReserves,
-                totalBorrows  : 30 * ONE_M,
-                blockNumber   : block.number - 5
-            })
-        );
+        bytes memory baseline = _baselineWithReserves(existingReserves, 30 * ONE_M);
 
         vm.startPrank(atk1);
         euler.deposit(200 * ONE_M);
@@ -136,7 +108,7 @@ contract EulerTrapFuzz is Test {
         euler.donateToReserves(donationAmount);
         vm.stopPrank();
 
-        (bool triggered, ) = trap.shouldRespond(_twoSampleWindow(baseline));
+        (bool triggered, ) = trap.shouldRespond(_fiveSampleWindow(baseline));
 
         if (donationBps >= 5_000) {
             assertTrue(triggered, "must trigger at >= 50% reserve spike with borrow growth");
@@ -145,10 +117,12 @@ contract EulerTrapFuzz is Test {
         }
     }
 
-    // Fuzz 4: shouldRespond handles any window size without reverting
+    // Fuzz 4: shouldRespond handles any window size without reverting.
+    // Below MIN_SAMPLE_SIZE (5) → never triggers (window-size guard).
     function testFuzz_WindowSize_Robustness(uint8 windowSize) public {
         windowSize = uint8(bound(windowSize, 0, 20));
 
+        _flushLogsToTrap();
         bytes[] memory w = new bytes[](windowSize);
         for (uint256 i; i < windowSize; i++) {
             w[i] = trap.collect();
@@ -156,32 +130,29 @@ contract EulerTrapFuzz is Test {
 
         (bool triggered, ) = trap.shouldRespond(w);
 
-        if (windowSize < 2) {
-            assertFalse(triggered, "< 2 samples must not trigger");
+        if (windowSize < trap.MIN_SAMPLE_SIZE()) {
+            assertFalse(triggered, "< MIN_SAMPLE_SIZE must not trigger");
         } else {
+            // identical clean snapshots (no growth, no bad debt) — must not trigger
             assertFalse(triggered, "identical clean windows must not trigger");
         }
     }
 
-    // Edge case: zero baseline reserves — no div-by-zero
+    // Edge case: zero baseline reserves — relative velocity disabled, but
+    // ABSOLUTE_RESERVE_SPIKE catches the equivalent in absolute terms.
     function test_EdgeCase_ZeroBaselineReserves_NoDivByZero() public {
-        bytes memory baseline = abi.encode(
-            EulerFinanceTrap.CollectOutput({
-                totalBadDebt  : 0,
-                totalReserves : 0,
-                totalBorrows  : 30 * ONE_M,
-                blockNumber   : block.number - 1
-            })
-        );
+        bytes memory baseline = _cleanBaselineEncoded();
 
+        // Smaller donation than ABSOLUTE_RESERVE_SPIKE → no trigger
         vm.startPrank(atk1);
         euler.deposit(100 * ONE_M);
         euler.borrow(50 * ONE_M);
-        euler.donateToReserves(10 * ONE_M);
+        euler.donateToReserves(10 * ONE_M); // 10M < 1M e18 threshold? need check
         vm.stopPrank();
 
-        // Must not revert. No bad debt (no liquidation), inv2 guard skips div-by-zero.
-        (bool triggered, ) = trap.shouldRespond(_twoSampleWindow(baseline));
-        assertFalse(triggered, "no bad debt, no velocity trigger");
+        (bool triggered, ) = trap.shouldRespond(_fiveSampleWindow(baseline));
+        // 10M units == 10_000_000e18 which IS >= ABSOLUTE_RESERVE_SPIKE (1M e18)
+        // So this DOES trigger AbsoluteReserveSpike. That's correct.
+        assertTrue(triggered, "10M reserve donation from zero baseline must trigger absolute spike");
     }
 }

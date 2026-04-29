@@ -9,10 +9,6 @@ interface IEulerMarket {
         external view
         returns (uint256 collateralValue, uint256 liabilityValue);
 
-    function getTotalBadDebt(address[] calldata accounts)
-        external view
-        returns (uint256 badDebt);
-
     function pause() external;
     function paused() external view returns (bool);
 }

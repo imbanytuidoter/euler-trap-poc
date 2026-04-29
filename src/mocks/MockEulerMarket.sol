@@ -31,6 +31,9 @@ contract MockEulerMarket is IEulerMarket {
     event DonateToReserves(address indexed account, uint256 amount);
     event Liquidate(address indexed liquidator, address indexed violator,
                     uint256 repaid, uint256 collateralTaken, uint256 badDebtCreated);
+    event Withdraw(address indexed account, uint256 eTokenAmount);
+    event Redeem(address indexed account, uint256 eTokenAmount);
+    event Transfer(address indexed from, address indexed to, uint256 eTokenAmount);
     event Paused();
 
     modifier notPaused() {
@@ -110,6 +113,40 @@ contract MockEulerMarket is IEulerMarket {
         emit Liquidate(msg.sender, violator, repayAmount, collateralTransferred, badDebtCreated);
     }
 
+    // Withdraw the underlying represented by eTokens. This is the actual
+    // exit path an attacker uses to extract stolen collateral.
+    // Solvency-guarded: cannot leave the position underwater.
+    function withdraw(uint256 eTokenAmount) external notPaused {
+        require(eTokenAmount > 0, "zero withdraw");
+        require(positions[msg.sender].eTokens >= eTokenAmount, "MockEuler: insufficient eTokens");
+        positions[msg.sender].eTokens -= eTokenAmount;
+        (uint256 col, uint256 liab) = _accountLiquidity(msg.sender);
+        require(col >= liab, "MockEuler: undercollateralized after withdraw");
+        emit Withdraw(msg.sender, eTokenAmount);
+    }
+
+    // Redeem eTokens for the underlying asset. Same effective path as withdraw
+    // for this single-asset mock; kept separate to mirror Euler v1 surface.
+    function redeem(uint256 eTokenAmount) external notPaused {
+        require(eTokenAmount > 0, "zero redeem");
+        require(positions[msg.sender].eTokens >= eTokenAmount, "MockEuler: insufficient eTokens");
+        positions[msg.sender].eTokens -= eTokenAmount;
+        (uint256 col, uint256 liab) = _accountLiquidity(msg.sender);
+        require(col >= liab, "MockEuler: undercollateralized after redeem");
+        emit Redeem(msg.sender, eTokenAmount);
+    }
+
+    // eToken transfer — secondary exit path (move stolen tokens to another EOA
+    // or a CEX before the protocol can pause). Must also be blocked.
+    function transferEToken(address to, uint256 eTokenAmount) external notPaused {
+        require(to != address(0), "zero recipient");
+        require(eTokenAmount > 0, "zero transfer");
+        require(positions[msg.sender].eTokens >= eTokenAmount, "MockEuler: insufficient eTokens");
+        positions[msg.sender].eTokens -= eTokenAmount;
+        positions[to].eTokens          += eTokenAmount;
+        emit Transfer(msg.sender, to, eTokenAmount);
+    }
+
     function totalBorrows() external view override returns (uint256) { return _totalBorrows; }
     function totalReserves() external view override returns (uint256) { return _totalReserves; }
     function paused() external view override returns (bool) { return _paused; }
@@ -121,20 +158,22 @@ contract MockEulerMarket is IEulerMarket {
         return _accountLiquidity(account);
     }
 
-    // Returns sum of (liabilityValue - collateralValue) for all underwater accounts.
+    function pause() external override {
+        _paused = true;
+        emit Paused();
+    }
+
+    // Test helper for direct verification of the donation→liquidation flow.
+    // The Trap itself uses getAccountLiquidity(account) per discovered address,
+    // not this aggregator.
     function getTotalBadDebt(address[] calldata accounts)
-        external view override
+        external view
         returns (uint256 badDebt)
     {
         for (uint256 i; i < accounts.length; i++) {
             (uint256 col, uint256 liab) = _accountLiquidity(accounts[i]);
             if (liab > col) { unchecked { badDebt += liab - col; } }
         }
-    }
-
-    function pause() external override {
-        _paused = true;
-        emit Paused();
     }
 
     function _accountLiquidity(address account)

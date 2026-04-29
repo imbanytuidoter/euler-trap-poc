@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-// Local mirror of Drosera abstract Trap contract.
+// Local mirror of the Drosera abstract Trap contract.
+// Matches the canonical ITrap surface: collect() + shouldRespond() + eventLogFilters().
 // Production source: https://github.com/drosera-network/drosera-contracts
 
 struct EventLog {
@@ -21,10 +22,7 @@ abstract contract Trap {
     function collect() external view virtual returns (bytes memory);
 
     function shouldRespond(bytes[] calldata data)
-        external pure virtual returns (bool, bytes memory);
-
-    function shouldAlert(bytes[] calldata data)
-        external pure virtual returns (bool, bytes memory);
+        external view virtual returns (bool, bytes memory);
 
     function eventLogFilters() public view virtual returns (EventFilter[] memory) {
         return new EventFilter[](0);
