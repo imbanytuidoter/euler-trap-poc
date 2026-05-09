@@ -1,2 +1,0 @@
-drosera-contracts/=lib/contracts/src/
-forge-std/=lib/forge-std/src/

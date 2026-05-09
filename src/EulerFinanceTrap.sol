@@ -211,20 +211,6 @@ contract EulerFinanceTrap is Trap {
         return (false, bytes(""));
     }
 
-    /// @notice Helper for off-chain consumers: decodes the typed alert payload
-    ///         that shouldRespond() / shouldAlert() emit.
-    function decodeAlertOutput(bytes calldata payload)
-        external pure
-        returns (
-            uint8 triggerType,
-            uint256 metric1,
-            uint256 metric2,
-            uint256 blockNumber
-        )
-    {
-        return abi.decode(payload, (uint8, uint256, uint256, uint256));
-    }
-
     // ---------- internal helpers ----------
 
     /// @dev Walks the recent event log set in priority order so that
@@ -236,31 +222,26 @@ contract EulerFinanceTrap is Trap {
     {
         EventLog[] memory logs = getEventLogs();
 
-        discovered = _collectBySignature(logs, discovered, DONATE_SIG,    1, false);
-        discovered = _collectBySignature(logs, discovered, LIQUIDATE_SIG, 2, true);
-        discovered = _collectBySignature(logs, discovered, MINT_SIG,      1, false);
-        discovered = _collectBySignature(logs, discovered, BORROW_SIG,    1, false);
-        discovered = _collectBySignature(logs, discovered, DEPOSIT_SIG,   1, false);
+        discovered = _collectBySignature(logs, discovered, DONATE_SIG,    1);
+        discovered = _collectBySignature(logs, discovered, LIQUIDATE_SIG, 2);
+        discovered = _collectBySignature(logs, discovered, MINT_SIG,      1);
+        discovered = _collectBySignature(logs, discovered, BORROW_SIG,    1);
+        discovered = _collectBySignature(logs, discovered, DEPOSIT_SIG,   1);
         // Liquidator addresses last — they're the responder, not the offender
-        discovered = _collectBySignature(logs, discovered, LIQUIDATE_SIG, 1, true);
+        discovered = _collectBySignature(logs, discovered, LIQUIDATE_SIG, 1);
     }
 
     function _collectBySignature(
         EventLog[] memory logs,
         DiscoverySet memory discovered,
         bytes32 signature,
-        uint256 topicIndex,
-        bool requireTopic
+        uint256 topicIndex
     ) internal pure returns (DiscoverySet memory) {
         for (uint256 i = 0; i < logs.length && discovered.count < MAX_ACCOUNTS; i++) {
             if (logs[i].emitter != EULER_MARKET) continue;
             if (logs[i].topics.length == 0) continue;
             if (logs[i].topics[0] != signature) continue;
-
-            if (logs[i].topics.length <= topicIndex) {
-                if (requireTopic) continue;
-                continue;
-            }
+            if (logs[i].topics.length <= topicIndex) continue;
 
             address account = _addressFromTopic(logs[i].topics[topicIndex]);
             discovered.count = _addUnique(discovered.accounts, discovered.count, account);
