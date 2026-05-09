@@ -1,0 +1,31 @@
+# drosera.toml.example
+#
+# Copy this file to drosera.toml after EulerPauseResponse is deployed.
+#
+# Deployment order:
+# 1. Deploy EulerPauseResponse(EULER_MARKET, DROSERA_TRAP_MANAGER)
+# 2. Replace response_contract below with the deployed response-contract address
+# 3. Make sure DROSERA_TRAP_MANAGER matches the actual Drosera response sender
+# 4. Run forge build
+# 5. Run drosera dryrun
+# 6. Run drosera apply
+
+ethereum_rpc    = "https://ethereum-rpc.example"
+drosera_rpc     = "https://relay.example.drosera.io"
+eth_chain_id    = 1
+drosera_address = "0x0000000000000000000000000000000000000000"
+
+[traps.euler_bad_debt_trap]
+path = "out/EulerFinanceTrap.sol/EulerFinanceTrap.json"
+
+response_contract = "0xREPLACE_WITH_DEPLOYED_EULER_PAUSE_RESPONSE"
+response_function = "respond(bytes)"
+
+block_sample_size      = 5
+cooldown_period_blocks = 10
+
+min_number_of_operators = 2
+max_number_of_operators = 10
+
+private_trap = false
+whitelist    = []

@@ -4,16 +4,6 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "./helpers/TrapHarness.sol";
 
-// Edge cases enumerated in the reviewer's PoC review:
-//   - Unknown attacker (event discovery works for any caller of the market)
-//   - Read failures (totalReserves, totalBorrows, getAccountLiquidity)
-//   - Zero-baseline absolute spike trigger
-//   - Window size > MIN_SAMPLE_SIZE doesn't distort thresholds
-//   - Attack split across multiple addresses
-//   - Attack split across multiple smaller donations
-//   - Legitimate large donation without borrow growth (no false positive)
-//   - Borrow growth without reserves growth (no false positive)
-
 contract EulerTrapEdgeCases is TrapHarness {
 
     address public alice = makeAddr("alice");
@@ -34,10 +24,10 @@ contract EulerTrapEdgeCases is TrapHarness {
         euler.borrow(30 * ONE_M);
     }
 
-    // The original PoC's biggest gap: an attacker not in the constructor's
-    // trackedAccounts list was invisible. With event-based discovery, ANY
-    // address that touches the market via Deposit/Borrow/Mint/Donate/Liquidate
-    // gets picked up automatically — there is no whitelist to be outside of.
+    // -------- discovery --------
+
+    // Event-based discovery picks up any address that touches the market via
+    // the subscribed signatures, no constructor whitelist required.
     function test_UnknownAttacker_DiscoveredViaEvents() public {
         address freshAttacker = makeAddr("never_seen_before");
 
@@ -60,8 +50,44 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertGt(badDebt, 0);
     }
 
-    // A read failure is itself a signal — silent zero would be a false negative.
-    function test_ReadFailure_TotalReserves_FiresReadFailureTrigger() public {
+    // Discovery is bounded by MAX_ACCOUNTS = 32. If 40 spammers each emit a
+    // Deposit, Deposit alone would fill the cap. Prioritization runs Donate
+    // and Liquidate-violator first, so the actual offender is still discovered.
+    function test_DiscoveryPriority_DonationAccountSurvivesDepositSpam() public {
+        for (uint256 i = 0; i < 40; i++) {
+            address spammer = address(uint160(uint256(keccak256(abi.encode("spam", i)))));
+            vm.prank(spammer);
+            euler.deposit(1e18);
+        }
+
+        address freshAttacker = makeAddr("priority_attacker");
+
+        vm.startPrank(freshAttacker);
+        euler.mint(150 * ONE_M, 150 * ONE_M * CF / BPS);
+        euler.donateToReserves(100 * ONE_M);
+        vm.stopPrank();
+
+        vm.prank(atk2);
+        euler.liquidate(freshAttacker, 375 * 1e5 * 1e18);
+
+        _flushLogsToTrap();
+        bytes[] memory window = _windowWithCurrent(trap.collect());
+
+        (bool triggered, bytes memory payload) = trap.shouldRespond(window);
+        assertTrue(
+            triggered,
+            "priority discovery must catch donation account despite deposit spam"
+        );
+
+        (uint8 triggerType, uint256 badDebt, , ) =
+            abi.decode(payload, (uint8, uint256, uint256, uint256));
+        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.BadDebt));
+        assertGt(badDebt, 0);
+    }
+
+    // -------- read failure (alert-only, never auto-pause) --------
+
+    function test_ReadFailure_TotalReserves_AlertsOnly() public {
         _flushLogsToTrap();
         vm.mockCallRevert(
             eulerAddr,
@@ -75,15 +101,23 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertFalse(out.reservesReadOk, "reservesReadOk must be false");
         assertTrue(out.borrowsReadOk, "borrowsReadOk should still be true");
 
-        (bool triggered, bytes memory payload) =
-            trap.shouldRespond(_windowWithCurrent(current));
-        assertTrue(triggered, "ReadFailure must trigger response");
+        bytes[] memory window = _windowWithCurrent(current);
 
-        (uint8 triggerType, , , ) = abi.decode(payload, (uint8, uint256, uint256, uint256));
-        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.ReadFailure));
+        (bool shouldRespondTrigger, ) = trap.shouldRespond(window);
+        assertFalse(shouldRespondTrigger, "read failure must not auto-trigger response");
+
+        (bool shouldAlertTrigger, bytes memory alertPayload) = trap.shouldAlert(window);
+        assertTrue(shouldAlertTrigger, "read failure must alert");
+
+        (uint8 triggerType, , , ) =
+            abi.decode(alertPayload, (uint8, uint256, uint256, uint256));
+        assertEq(
+            triggerType,
+            uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly)
+        );
     }
 
-    function test_ReadFailure_TotalBorrows_FiresReadFailureTrigger() public {
+    function test_ReadFailure_TotalBorrows_AlertsOnly() public {
         _flushLogsToTrap();
         vm.mockCallRevert(
             eulerAddr,
@@ -92,15 +126,21 @@ contract EulerTrapEdgeCases is TrapHarness {
         );
 
         bytes memory current = trap.collect();
-        (bool triggered, bytes memory payload) =
-            trap.shouldRespond(_windowWithCurrent(current));
-        assertTrue(triggered);
-        (uint8 triggerType, , , ) = abi.decode(payload, (uint8, uint256, uint256, uint256));
-        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.ReadFailure));
+        bytes[] memory window = _windowWithCurrent(current);
+
+        (bool shouldRespondTrigger, ) = trap.shouldRespond(window);
+        assertFalse(shouldRespondTrigger);
+
+        (bool shouldAlertTrigger, bytes memory alertPayload) = trap.shouldAlert(window);
+        assertTrue(shouldAlertTrigger);
+
+        (uint8 triggerType, , , ) =
+            abi.decode(alertPayload, (uint8, uint256, uint256, uint256));
+        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly));
     }
 
-    function test_ReadFailure_AccountLiquidity_FiresReadFailureTrigger() public {
-        // Need an account discovered via events, then make its liquidity read revert
+    function test_ReadFailure_AccountLiquidity_AlertsOnly() public {
+        // need an account discovered via events first
         vm.prank(atk1);
         euler.deposit(10 * ONE_M);
         _flushLogsToTrap();
@@ -116,16 +156,39 @@ contract EulerTrapEdgeCases is TrapHarness {
             abi.decode(current, (EulerFinanceTrap.CollectOutput));
         assertFalse(out.accountReadsOk, "accountReadsOk must be false");
 
-        (bool triggered, bytes memory payload) =
-            trap.shouldRespond(_windowWithCurrent(current));
-        assertTrue(triggered);
-        (uint8 triggerType, , , ) = abi.decode(payload, (uint8, uint256, uint256, uint256));
-        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.ReadFailure));
+        bytes[] memory window = _windowWithCurrent(current);
+
+        (bool shouldRespondTrigger, ) = trap.shouldRespond(window);
+        assertFalse(shouldRespondTrigger);
+
+        (bool shouldAlertTrigger, bytes memory alertPayload) = trap.shouldAlert(window);
+        assertTrue(shouldAlertTrigger);
+
+        (uint8 triggerType, , , ) =
+            abi.decode(alertPayload, (uint8, uint256, uint256, uint256));
+        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly));
     }
 
-    // Zero baseline reserves: relative velocity guard skips, absolute threshold catches it.
+    // -------- malformed input --------
+
+    // Garbage bytes in the sample window must not crash shouldRespond.
+    function test_MalformedCollectSample_DoesNotRevertShouldRespond() public {
+        bytes[] memory window = new bytes[](5);
+        window[0] = hex"1234";
+        window[1] = _cleanBaselineEncoded();
+        window[2] = _cleanBaselineEncoded();
+        window[3] = _cleanBaselineEncoded();
+        window[4] = _cleanBaselineEncoded();
+
+        (bool triggered, bytes memory payload) = trap.shouldRespond(window);
+
+        assertFalse(triggered);
+        assertEq(payload.length, 0);
+    }
+
+    // -------- velocity / absolute spike --------
+
     function test_ZeroBaseline_AbsoluteReserveSpike_Triggers() public {
-        // Donation big enough to cross ABSOLUTE_RESERVE_SPIKE (1M e18 = 1M units)
         vm.startPrank(atk1);
         euler.deposit(500 * ONE_M);
         euler.borrow(100 * ONE_M);
@@ -142,12 +205,10 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.AbsoluteReserveSpike));
     }
 
-    // Below absolute threshold + zero baseline + no bad debt → no false positive.
     function test_ZeroBaseline_BelowAbsoluteThreshold_NoTrigger() public {
         vm.startPrank(atk1);
         euler.deposit(10 * ONE_M);
         euler.borrow(5 * ONE_M);
-        // 0.5M units < 1M absolute threshold
         euler.donateToReserves(500_000 * 1e18);
         vm.stopPrank();
         _flushLogsToTrap();
@@ -158,7 +219,8 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertFalse(triggered, "small donation under absolute threshold must not trigger");
     }
 
-    // Reviewer point: window size > MIN_SAMPLE_SIZE should not distort detection.
+    // -------- window robustness --------
+
     function test_LongerWindow_DoesNotDistortDetection() public {
         vm.startPrank(atk1);
         euler.mint(150 * ONE_M, 150 * ONE_M * CF / BPS);
@@ -170,7 +232,6 @@ contract EulerTrapEdgeCases is TrapHarness {
 
         bytes memory current = trap.collect();
 
-        // 10-block window — should still fire (BadDebt is invariant)
         bytes[] memory window = new bytes[](10);
         window[0] = current;
         for (uint256 i = 1; i < 10; i++) window[i] = _cleanBaselineEncoded();
@@ -182,9 +243,8 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.BadDebt));
     }
 
-    // Attack split across multiple addresses — each one performs the donation
-    // sequence with separately-funded positions. Aggregated bad debt across
-    // multiple discovered accounts must still fire.
+    // -------- attack distribution --------
+
     function test_AttackSplit_AcrossMultipleAddresses() public {
         address[3] memory attackers = [atk1, atk2, atk3];
         for (uint256 i = 0; i < attackers.length; i++) {
@@ -193,7 +253,6 @@ contract EulerTrapEdgeCases is TrapHarness {
             euler.donateToReserves(33 * ONE_M);
             vm.stopPrank();
 
-            // Use a fresh helper liquidator each time so we have a separate EOA
             address liqr = makeAddr(string(abi.encodePacked("liqr", i)));
             vm.prank(liqr);
             euler.liquidate(attackers[i], 12_500_000 * 1e18);
@@ -211,12 +270,9 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertGe(unhealthyCount, 3, "at least 3 unhealthy attacker accounts discovered");
     }
 
-    // Multiple smaller donations summing above the threshold must still fire.
     function test_AttackSplit_AcrossMultipleSmallerDonations() public {
         vm.startPrank(atk1);
         euler.mint(150 * ONE_M, 150 * ONE_M * CF / BPS);
-        // 5 × 22M donations = 110M total. Each below half of collateral but
-        // collectively large enough to push the position underwater.
         for (uint256 i = 0; i < 5; i++) {
             euler.donateToReserves(22 * ONE_M);
         }
@@ -233,14 +289,11 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.BadDebt));
     }
 
-    // Legitimate large donation with no borrow growth must NOT trigger.
-    // Velocity invariant requires BOTH reserve growth AND borrow growth.
+    // -------- no false positives --------
+
     function test_LegitimateDonation_WithoutBorrowGrowth_NoFalsePositive() public {
-        // baseline already has 30M borrows from setUp's alice
         bytes memory baseline = _baselineWithReserves(2 * ONE_M, 30 * ONE_M);
 
-        // Legitimate top-up: someone donates to reserves but borrows don't grow.
-        // Use a wealthy depositor — must keep healthy positions throughout.
         vm.startPrank(alice);
         euler.deposit(100 * ONE_M);
         euler.donateToReserves(50 * ONE_M);
@@ -254,7 +307,6 @@ contract EulerTrapEdgeCases is TrapHarness {
         assertFalse(triggered, "donation without borrow growth must not trigger");
     }
 
-    // Pure borrow growth (no reserve donation) must NOT trigger velocity.
     function test_BorrowGrowth_WithoutReserveSpike_NoFalsePositive() public {
         bytes memory baseline = _baselineWithReserves(10 * ONE_M, 30 * ONE_M);
 

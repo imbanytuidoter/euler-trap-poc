@@ -3,8 +3,8 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import "../../src/EulerFinanceTrap.sol";
-import "../../src/Trap.sol";
 import "../../src/mocks/MockEulerMarket.sol";
+import {EventLog} from "drosera-contracts/libraries/Events.sol";
 
 // Shared harness that mirrors how Drosera deploys and feeds a Trap:
 //   - The Trap is deployed without arguments at a test-local address.

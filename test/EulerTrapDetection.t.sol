@@ -238,11 +238,46 @@ contract EulerTrapDetection is TrapHarness {
         vm.prank(trapManager);
         response.respond(badPayload);
 
-        // Trigger type out of range (5) is rejected
+        // Trigger type out of range (99) is rejected
         bytes memory outOfRange = abi.encode(uint8(99), uint256(0), uint256(0), uint256(0));
         vm.expectRevert(abi.encodeWithSelector(EulerPauseResponse.UnknownTriggerType.selector, uint8(99)));
         vm.prank(trapManager);
         response.respond(outOfRange);
+    }
+
+    // [9] Response contract refuses ReadFailureAlertOnly: shouldAlert can emit
+    //     it for monitoring, but it must never auto-pause the protocol.
+    function test_ResponseRejectsReadFailureAlertOnly() public {
+        bytes memory readFailurePayload = abi.encode(
+            uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly),
+            uint256(0),
+            uint256(0),
+            uint256(block.number)
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EulerPauseResponse.UnknownTriggerType.selector,
+                uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly)
+            )
+        );
+        vm.prank(trapManager);
+        response.respond(readFailurePayload);
+    }
+
+    // [10] Oversized payloads (5+ encoded fields) are rejected before decoding.
+    function test_ResponseRejectsOversizedPayload() public {
+        bytes memory oversized = abi.encode(
+            uint8(EulerFinanceTrap.TriggerType.BadDebt),
+            uint256(1),
+            uint256(1),
+            uint256(block.number),
+            uint256(999)
+        );
+
+        vm.expectRevert(EulerPauseResponse.InvalidPayload.selector);
+        vm.prank(trapManager);
+        response.respond(oversized);
     }
 
     function _validBadDebtPayload() internal pure returns (bytes memory) {

@@ -1,52 +1,34 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "./Trap.sol";
+import {Trap} from "drosera-contracts/Trap.sol";
+import {EventLog, EventFilter} from "drosera-contracts/libraries/Events.sol";
 import "./interfaces/IEulerMarket.sol";
 
-// Drosera Trap — Euler Finance donateToReserves() exploit.
-// March 13 2023, block 16818057, ~$197M.
-//
-// This Trap is deployed by Drosera Operators in REVM/shadow-fork without
-// constructor arguments. EULER_MARKET is hardcoded; monitored accounts are
-// discovered each block from recent event logs (Drosera's getEventLogs()).
-//
-// Detection layers:
-//
-// 1. ReadFailure (operational)
-//    Any market read reverts → Trap fires immediately. A failed read is a
-//    signal in itself; silently substituting zero produces false negatives.
-//
-// 2. BadDebt (hard invariant)
-//    For each account discovered in recent Deposit/Borrow/Mint/Donate/Liquidate
-//    events: if liabilityValue > collateralValue → bad debt.
-//    Note: this is bad debt across DISCOVERED accounts only, not protocol-wide.
-//    Protocol-wide bad debt detection requires a protocol-level aggregator
-//    (which Euler v1 did not have).
-//
-// 3. ReserveVelocity (early warning)
-//    reserveGrowth >= 50% over the sample window AND totalBorrows grew.
-//    Catches the donation+leverage fingerprint before the position is liquidated.
-//    Disabled when base.totalReserves == 0 (avoid div-by-zero).
-//
-// 4. AbsoluteReserveSpike (zero-baseline coverage)
-//    If base.totalReserves == 0 and curr.totalReserves crosses an absolute
-//    threshold while borrows grew. Closes the gap that ReserveVelocity opens
-//    when reserves start at zero.
-
+/// @title EulerFinanceTrap
+/// @notice Mock-production Drosera Trap that detects Euler-style bad debt and
+///         reserve-donation anomalies on a single configured market.
+///
+/// Important scope:
+/// - This is not a byte-for-byte reconstruction of Euler v1.
+/// - It detects bad debt only across accounts discovered from recent event logs.
+/// - It does not claim to interrupt an already-atomic transaction during execution.
+/// - It can fire a response as soon as a broken invariant becomes observable.
 contract EulerFinanceTrap is Trap {
 
-    // Real Euler v1 markets contract (Ethereum mainnet, pre-exploit).
-    // Tests etch MockEulerMarket code at this address.
+    // Real Euler v1 markets contract on Ethereum mainnet (pre-exploit).
+    // Tests etch MockEulerMarket bytecode at this address.
     address public constant EULER_MARKET = 0x27182842E098f60e3D576794A5bFFb0777E025d3;
 
-    // Detection thresholds. Drosera deploys without args, so everything is constant.
     uint256 public constant RESERVE_SPIKE_BPS      = 5_000;        // 50%
     uint256 public constant ABSOLUTE_RESERVE_SPIKE = 1_000_000e18; // 1M units
-    uint256 public constant MIN_SAMPLE_SIZE        = 5;            // matches drosera.toml
+    uint256 public constant MIN_SAMPLE_SIZE        = 5;
 
-    uint256 private constant BPS          = 10_000;
-    uint256 private constant MAX_ACCOUNTS = 32;
+    uint256 private constant BPS                    = 10_000;
+    uint256 private constant MAX_ACCOUNTS           = 32;
+    // Smallest possible abi-encoded CollectOutput: 5 uint256 + 3 bool, all
+    // padded to 32 bytes each.
+    uint256 private constant COLLECT_OUTPUT_MIN_SIZE = 8 * 32;
 
     bytes32 private constant DEPOSIT_SIG   = keccak256("Deposit(address,uint256)");
     bytes32 private constant BORROW_SIG    = keccak256("Borrow(address,uint256)");
@@ -54,12 +36,15 @@ contract EulerFinanceTrap is Trap {
     bytes32 private constant DONATE_SIG    = keccak256("DonateToReserves(address,uint256)");
     bytes32 private constant LIQUIDATE_SIG = keccak256("Liquidate(address,address,uint256,uint256,uint256)");
 
+    /// @notice Trigger categories. ReadFailureAlertOnly is intentionally non-actionable:
+    ///         shouldRespond ignores it, shouldAlert emits it for monitoring,
+    ///         the response contract rejects it.
     enum TriggerType {
         None,
         BadDebt,
         ReserveVelocity,
         AbsoluteReserveSpike,
-        ReadFailure
+        ReadFailureAlertOnly
     }
 
     struct CollectOutput {
@@ -75,54 +60,46 @@ contract EulerFinanceTrap is Trap {
         bool accountReadsOk;
     }
 
+    /// @dev Fixed-size accumulator for discovered accounts. Lives in memory only.
+    struct DiscoverySet {
+        address[MAX_ACCOUNTS] accounts;
+        uint256 count;
+    }
+
     constructor() {}
 
-    // Subscribe to events that identify "recently active" Euler accounts.
-    // Drosera Operators feed matching logs into _eventLogs each block; collect()
-    // reads them via getEventLogs().
+    /// @notice Event filters consumed by Drosera operators.
+    /// @dev Order here is just for human readability; the actual
+    ///      account-discovery prioritization is enforced inside collect().
     function eventLogFilters()
         public pure override
         returns (EventFilter[] memory filters)
     {
         filters = new EventFilter[](5);
-        filters[0] = EventFilter({ contractAddress: EULER_MARKET, signature: "Deposit(address,uint256)" });
-        filters[1] = EventFilter({ contractAddress: EULER_MARKET, signature: "Borrow(address,uint256)"  });
+        filters[0] = EventFilter({ contractAddress: EULER_MARKET, signature: "DonateToReserves(address,uint256)" });
+        filters[1] = EventFilter({ contractAddress: EULER_MARKET, signature: "Liquidate(address,address,uint256,uint256,uint256)" });
         filters[2] = EventFilter({ contractAddress: EULER_MARKET, signature: "Mint(address,uint256,uint256)" });
-        filters[3] = EventFilter({ contractAddress: EULER_MARKET, signature: "DonateToReserves(address,uint256)" });
-        filters[4] = EventFilter({ contractAddress: EULER_MARKET, signature: "Liquidate(address,address,uint256,uint256,uint256)" });
+        filters[3] = EventFilter({ contractAddress: EULER_MARKET, signature: "Borrow(address,uint256)" });
+        filters[4] = EventFilter({ contractAddress: EULER_MARKET, signature: "Deposit(address,uint256)" });
     }
 
     function collect() external view override returns (bytes memory) {
         IEulerMarket market = IEulerMarket(EULER_MARKET);
 
-        // 1. Discover accounts from recent event logs (capped at MAX_ACCOUNTS).
-        address[MAX_ACCOUNTS] memory discovered;
-        uint256 count;
-        EventLog[] memory logs = getEventLogs();
-        for (uint256 i = 0; i < logs.length && count < MAX_ACCOUNTS; i++) {
-            if (logs[i].emitter != EULER_MARKET) continue;
-            if (logs[i].topics.length < 2) continue;
+        DiscoverySet memory discovered = _discoverAccountsPrioritized();
 
-            bytes32 sig = logs[i].topics[0];
-            if (sig == DEPOSIT_SIG || sig == BORROW_SIG || sig == MINT_SIG || sig == DONATE_SIG) {
-                count = _addUnique(discovered, count, _addressFromTopic(logs[i].topics[1]));
-            } else if (sig == LIQUIDATE_SIG && logs[i].topics.length >= 3) {
-                count = _addUnique(discovered, count, _addressFromTopic(logs[i].topics[1])); // liquidator
-                if (count < MAX_ACCOUNTS) {
-                    count = _addUnique(discovered, count, _addressFromTopic(logs[i].topics[2])); // violator
-                }
-            }
-        }
-
-        // 2. Per-account liquidity. Read failure on ANY account flips accountReadsOk.
         uint256 sampledBadDebt;
         uint256 unhealthyAccountCount;
         bool accountReadsOk = true;
-        for (uint256 i = 0; i < count; i++) {
-            try market.getAccountLiquidity(discovered[i]) returns (uint256 col, uint256 liab) {
-                if (liab > col) {
+
+        for (uint256 i = 0; i < discovered.count; i++) {
+            try market.getAccountLiquidity(discovered.accounts[i]) returns (
+                uint256 collateralValue,
+                uint256 liabilityValue
+            ) {
+                if (liabilityValue > collateralValue) {
                     unchecked {
-                        sampledBadDebt += liab - col;
+                        sampledBadDebt += liabilityValue - collateralValue;
                     }
                     unhealthyAccountCount++;
                 }
@@ -131,11 +108,11 @@ contract EulerFinanceTrap is Trap {
             }
         }
 
-        // 3. Protocol aggregates with explicit success flags. Failure ≠ zero.
         uint256 reserves;
         uint256 borrows;
         bool reservesReadOk;
         bool borrowsReadOk;
+
         try market.totalReserves() returns (uint256 r) { reserves = r; reservesReadOk = true; } catch {}
         try market.totalBorrows()  returns (uint256 b) { borrows  = b; borrowsReadOk  = true; } catch {}
 
@@ -151,28 +128,25 @@ contract EulerFinanceTrap is Trap {
         }));
     }
 
-    // data is newest-first: data[0] = current block, data[len-1] = oldest.
-    // Requires MIN_SAMPLE_SIZE samples — threshold semantics depend on a fixed window.
+    /// @notice Auto-pause path. Read failures are intentionally ignored here —
+    ///         a failed read is alert-only material via shouldAlert(), not
+    ///         grounds to halt the protocol.
     function shouldRespond(bytes[] calldata data)
         external pure override
         returns (bool, bytes memory)
     {
         if (data.length < MIN_SAMPLE_SIZE) return (false, bytes(""));
+        if (!_validEncodedSample(data[0])) return (false, bytes(""));
+        if (!_validEncodedSample(data[data.length - 1])) return (false, bytes(""));
 
-        CollectOutput memory curr = abi.decode(data[0],                (CollectOutput));
+        CollectOutput memory curr = abi.decode(data[0], (CollectOutput));
         CollectOutput memory base = abi.decode(data[data.length - 1], (CollectOutput));
 
-        // Layer 1 — read failure dominates everything else.
+        // Read failure → no auto-pause. shouldAlert handles it instead.
         if (!curr.reservesReadOk || !curr.borrowsReadOk || !curr.accountReadsOk) {
-            return (true, abi.encode(
-                uint8(TriggerType.ReadFailure),
-                uint256(0),
-                uint256(0),
-                curr.blockNumber
-            ));
+            return (false, bytes(""));
         }
 
-        // Layer 2 — bad debt across discovered accounts.
         if (curr.sampledBadDebt > 0) {
             return (true, abi.encode(
                 uint8(TriggerType.BadDebt),
@@ -182,10 +156,9 @@ contract EulerFinanceTrap is Trap {
             ));
         }
 
-        // Layer 3 — relative reserve velocity (only when base reserves > 0).
         if (base.totalReserves > 0 && curr.totalReserves > base.totalReserves) {
             uint256 reserveGrowthBps =
-                (curr.totalReserves - base.totalReserves) * BPS / base.totalReserves;
+                ((curr.totalReserves - base.totalReserves) * BPS) / base.totalReserves;
             bool reserveSpike = reserveGrowthBps >= RESERVE_SPIKE_BPS;
             bool borrowsGrew  = curr.totalBorrows > base.totalBorrows;
             if (reserveSpike && borrowsGrew) {
@@ -198,7 +171,6 @@ contract EulerFinanceTrap is Trap {
             }
         }
 
-        // Layer 4 — absolute reserve spike from zero baseline.
         if (
             base.totalReserves == 0 &&
             curr.totalReserves >= ABSOLUTE_RESERVE_SPIKE &&
@@ -215,7 +187,90 @@ contract EulerFinanceTrap is Trap {
         return (false, bytes(""));
     }
 
+    /// @notice Alert-only path. Currently emits ReadFailureAlertOnly when any
+    ///         market read failed. Operators / humans can subscribe without
+    ///         exposing the protocol to false-positive auto-pauses.
+    function shouldAlert(bytes[] calldata data)
+        external pure override
+        returns (bool, bytes memory)
+    {
+        if (data.length == 0) return (false, bytes(""));
+        if (!_validEncodedSample(data[0])) return (false, bytes(""));
+
+        CollectOutput memory curr = abi.decode(data[0], (CollectOutput));
+
+        if (!curr.reservesReadOk || !curr.borrowsReadOk || !curr.accountReadsOk) {
+            return (true, abi.encode(
+                uint8(TriggerType.ReadFailureAlertOnly),
+                uint256(0),
+                uint256(0),
+                curr.blockNumber
+            ));
+        }
+
+        return (false, bytes(""));
+    }
+
+    /// @notice Helper for off-chain consumers: decodes the typed alert payload
+    ///         that shouldRespond() / shouldAlert() emit.
+    function decodeAlertOutput(bytes calldata payload)
+        external pure
+        returns (
+            uint8 triggerType,
+            uint256 metric1,
+            uint256 metric2,
+            uint256 blockNumber
+        )
+    {
+        return abi.decode(payload, (uint8, uint256, uint256, uint256));
+    }
+
     // ---------- internal helpers ----------
+
+    /// @dev Walks the recent event log set in priority order so that
+    ///      attack-relevant signatures (Donate / Liquidate violator / Mint)
+    ///      take cap slots before noisier Deposit/Borrow activity can fill it.
+    function _discoverAccountsPrioritized()
+        internal view
+        returns (DiscoverySet memory discovered)
+    {
+        EventLog[] memory logs = getEventLogs();
+
+        discovered = _collectBySignature(logs, discovered, DONATE_SIG,    1, false);
+        discovered = _collectBySignature(logs, discovered, LIQUIDATE_SIG, 2, true);
+        discovered = _collectBySignature(logs, discovered, MINT_SIG,      1, false);
+        discovered = _collectBySignature(logs, discovered, BORROW_SIG,    1, false);
+        discovered = _collectBySignature(logs, discovered, DEPOSIT_SIG,   1, false);
+        // Liquidator addresses last — they're the responder, not the offender
+        discovered = _collectBySignature(logs, discovered, LIQUIDATE_SIG, 1, true);
+    }
+
+    function _collectBySignature(
+        EventLog[] memory logs,
+        DiscoverySet memory discovered,
+        bytes32 signature,
+        uint256 topicIndex,
+        bool requireTopic
+    ) internal pure returns (DiscoverySet memory) {
+        for (uint256 i = 0; i < logs.length && discovered.count < MAX_ACCOUNTS; i++) {
+            if (logs[i].emitter != EULER_MARKET) continue;
+            if (logs[i].topics.length == 0) continue;
+            if (logs[i].topics[0] != signature) continue;
+
+            if (logs[i].topics.length <= topicIndex) {
+                if (requireTopic) continue;
+                continue;
+            }
+
+            address account = _addressFromTopic(logs[i].topics[topicIndex]);
+            discovered.count = _addUnique(discovered.accounts, discovered.count, account);
+        }
+        return discovered;
+    }
+
+    function _validEncodedSample(bytes calldata sample) internal pure returns (bool) {
+        return sample.length >= COLLECT_OUTPUT_MIN_SIZE;
+    }
 
     function _addressFromTopic(bytes32 topic) internal pure returns (address) {
         return address(uint160(uint256(topic)));
