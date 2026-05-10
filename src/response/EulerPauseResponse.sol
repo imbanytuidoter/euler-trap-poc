@@ -19,7 +19,6 @@ import "../interfaces/IEulerMarket.sol";
 ///   0 = None
 ///   4 = ReadFailureAlertOnly  — alert-only signal, must not auto-pause the protocol
 contract EulerPauseResponse {
-
     address public immutable EULER_MARKET;
     address public immutable DROSERA_TRAP_MANAGER;
 
@@ -33,7 +32,7 @@ contract EulerPauseResponse {
 
     constructor(address market, address trapManager) {
         if (market == address(0) || trapManager == address(0)) revert ZeroAddress();
-        EULER_MARKET         = market;
+        EULER_MARKET = market;
         DROSERA_TRAP_MANAGER = trapManager;
     }
 
@@ -48,6 +47,10 @@ contract EulerPauseResponse {
         // 0 (None) and >3 (currently only 4 = ReadFailureAlertOnly) are rejected.
         if (triggerType == 0 || triggerType > 3) revert UnknownTriggerType(triggerType);
 
+        // EULER_MARKET is an immutable pointer set at construction; we treat it
+        // as a trusted target. The post-call event emission is intentional —
+        // we want the event to mark a successful pause, not an attempted one.
+        // slither-disable-next-line reentrancy-events
         IEulerMarket(EULER_MARKET).pause();
         emit ProtocolPaused(triggerType, metric1, metric2, atBlock);
     }

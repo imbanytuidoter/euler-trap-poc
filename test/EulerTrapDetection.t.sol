@@ -11,17 +11,16 @@ import "../src/response/EulerPauseResponse.sol";
 // account list, no shared trackedAccounts state.
 
 contract EulerTrapDetection is TrapHarness {
-
     EulerPauseResponse public response;
 
-    address public alice       = makeAddr("alice");
-    address public atk1        = makeAddr("atk1");
-    address public atk2        = makeAddr("atk2");
+    address public alice = makeAddr("alice");
+    address public atk1 = makeAddr("atk1");
+    address public atk2 = makeAddr("atk2");
     address public trapManager = makeAddr("trapManager");
 
     uint256 constant ONE_M = 1_000_000 * 1e18;
-    uint256 constant CF    = 7500;
-    uint256 constant BPS   = 10_000;
+    uint256 constant CF = 7500;
+    uint256 constant BPS = 10_000;
 
     function setUp() public {
         _deployHarness();
@@ -43,7 +42,7 @@ contract EulerTrapDetection is TrapHarness {
             window[i] = trap.collect();
             vm.roll(block.number + 1);
         }
-        (bool triggered, ) = trap.shouldRespond(_newestFirst(window));
+        (bool triggered,) = trap.shouldRespond(_newestFirst(window));
         assertFalse(triggered, "MUST NOT trigger on normal operation");
         console.log("[OK] No false positive across 5 normal blocks");
     }
@@ -104,21 +103,17 @@ contract EulerTrapDetection is TrapHarness {
         bytes memory current = trap.collect();
 
         // Decode current to assert no bad debt was triggered (proving Invariant 2 fired alone)
-        EulerFinanceTrap.CollectOutput memory currOut =
-            abi.decode(current, (EulerFinanceTrap.CollectOutput));
+        EulerFinanceTrap.CollectOutput memory currOut = abi.decode(current, (EulerFinanceTrap.CollectOutput));
         assertEq(currOut.sampledBadDebt, 0, "position must remain solvent");
         assertGt(currOut.totalReserves, 5 * ONE_M, "reserves must have spiked");
 
         // base.totalReserves = 5M, curr.totalReserves = 40M → growth = 700% → trigger
-        bytes[] memory window = _windowWithCurrentAndBase(
-            current,
-            _baselineWithReserves(5 * ONE_M, 30 * ONE_M)
-        );
+        bytes[] memory window = _windowWithCurrentAndBase(current, _baselineWithReserves(5 * ONE_M, 30 * ONE_M));
 
         (bool triggered, bytes memory payload) = trap.shouldRespond(window);
         assertTrue(triggered, "shouldRespond() MUST trigger on velocity anomaly");
 
-        (uint8 triggerType, uint256 growthBps, uint256 borrowIncrease, ) =
+        (uint8 triggerType, uint256 growthBps, uint256 borrowIncrease,) =
             abi.decode(payload, (uint8, uint256, uint256, uint256));
 
         assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.ReserveVelocity), "must be ReserveVelocity");
@@ -164,7 +159,7 @@ contract EulerTrapDetection is TrapHarness {
         vm.prank(atk2);
         euler.transferEToken(makeAddr("cex"), 1);
 
-        (uint256 atk2Collateral, ) = euler.getAccountLiquidity(atk2);
+        (uint256 atk2Collateral,) = euler.getAccountLiquidity(atk2);
         assertGt(atk2Collateral, 0, "stolen collateral is locked");
 
         console.log("=== MITIGATION COMPLETE ===");
@@ -192,26 +187,24 @@ contract EulerTrapDetection is TrapHarness {
         four[1] = _cleanBaselineEncoded();
         four[2] = _cleanBaselineEncoded();
         four[3] = _cleanBaselineEncoded();
-        (bool triggered, ) = trap.shouldRespond(four);
+        (bool triggered,) = trap.shouldRespond(four);
         assertFalse(triggered, "must not trigger with < MIN_SAMPLE_SIZE samples");
 
         // 1 sample
         bytes[] memory one = new bytes[](1);
         one[0] = current;
-        (triggered, ) = trap.shouldRespond(one);
+        (triggered,) = trap.shouldRespond(one);
         assertFalse(triggered);
 
         // 0 samples
         bytes[] memory zero = new bytes[](0);
-        (triggered, ) = trap.shouldRespond(zero);
+        (triggered,) = trap.shouldRespond(zero);
         assertFalse(triggered);
     }
 
     // [6] Only trapManager can call respond()
     function test_ResponseAuthorization_OnlyTrapManager() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(EulerPauseResponse.OnlyTrapManager.selector, address(this))
-        );
+        vm.expectRevert(abi.encodeWithSelector(EulerPauseResponse.OnlyTrapManager.selector, address(this)));
         response.respond(_validBadDebtPayload());
     }
 
@@ -249,16 +242,12 @@ contract EulerTrapDetection is TrapHarness {
     //     it for monitoring, but it must never auto-pause the protocol.
     function test_ResponseRejectsReadFailureAlertOnly() public {
         bytes memory readFailurePayload = abi.encode(
-            uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly),
-            uint256(0),
-            uint256(0),
-            uint256(block.number)
+            uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly), uint256(0), uint256(0), uint256(block.number)
         );
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                EulerPauseResponse.UnknownTriggerType.selector,
-                uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly)
+                EulerPauseResponse.UnknownTriggerType.selector, uint8(EulerFinanceTrap.TriggerType.ReadFailureAlertOnly)
             )
         );
         vm.prank(trapManager);
@@ -268,11 +257,7 @@ contract EulerTrapDetection is TrapHarness {
     // [10] Oversized payloads (5+ encoded fields) are rejected before decoding.
     function test_ResponseRejectsOversizedPayload() public {
         bytes memory oversized = abi.encode(
-            uint8(EulerFinanceTrap.TriggerType.BadDebt),
-            uint256(1),
-            uint256(1),
-            uint256(block.number),
-            uint256(999)
+            uint8(EulerFinanceTrap.TriggerType.BadDebt), uint256(1), uint256(1), uint256(block.number), uint256(999)
         );
 
         vm.expectRevert(EulerPauseResponse.InvalidPayload.selector);
@@ -281,11 +266,6 @@ contract EulerTrapDetection is TrapHarness {
     }
 
     function _validBadDebtPayload() internal pure returns (bytes memory) {
-        return abi.encode(
-            uint8(EulerFinanceTrap.TriggerType.BadDebt),
-            uint256(1e18),
-            uint256(1),
-            uint256(16_818_057)
-        );
+        return abi.encode(uint8(EulerFinanceTrap.TriggerType.BadDebt), uint256(1e18), uint256(1), uint256(16_818_057));
     }
 }
