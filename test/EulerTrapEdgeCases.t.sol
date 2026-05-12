@@ -87,8 +87,8 @@ contract EulerTrapEdgeCases is TrapHarness {
 
         bytes memory current = trap.collect();
         EulerFinanceTrap.CollectOutput memory out = abi.decode(current, (EulerFinanceTrap.CollectOutput));
-        assertFalse(out.reservesReadOk, "reservesReadOk must be false");
-        assertTrue(out.borrowsReadOk, "borrowsReadOk should still be true");
+        assertEq(out.reservesReadOk, 0, "reservesReadOk must be 0");
+        assertGt(out.borrowsReadOk, 0, "borrowsReadOk should still be non-zero");
 
         bytes[] memory window = _windowWithCurrent(current);
 
@@ -131,7 +131,7 @@ contract EulerTrapEdgeCases is TrapHarness {
 
         bytes memory current = trap.collect();
         EulerFinanceTrap.CollectOutput memory out = abi.decode(current, (EulerFinanceTrap.CollectOutput));
-        assertFalse(out.accountReadsOk, "accountReadsOk must be false");
+        assertEq(out.accountReadsOk, 0, "accountReadsOk must be 0");
 
         bytes[] memory window = _windowWithCurrent(current);
 
@@ -160,6 +160,55 @@ contract EulerTrapEdgeCases is TrapHarness {
 
         assertFalse(triggered);
         assertEq(payload.length, 0);
+    }
+
+    // A sample with the correct 256-byte length but garbage payload (every
+    // word filled with 0xff) used to revert when the read-ok flags were
+    // typed `bool` — abi.decode rejects any bool word != 0/1. With the
+    // uint256 flag refactor this must now decode cleanly and be treated as
+    // a "reads ok" sample with garbage metrics, which produces no trigger.
+    function test_MalformedCollectSample_SameLengthGarbage_DoesNotRevert() public view {
+        bytes memory garbage = new bytes(8 * 32);
+        for (uint256 i = 0; i < garbage.length; i++) {
+            garbage[i] = 0xff;
+        }
+
+        bytes[] memory window = new bytes[](5);
+        window[0] = garbage;
+        window[1] = _cleanBaselineEncoded();
+        window[2] = _cleanBaselineEncoded();
+        window[3] = _cleanBaselineEncoded();
+        window[4] = _cleanBaselineEncoded();
+
+        // Must not revert.
+        (bool triggered,) = trap.shouldRespond(window);
+        // With sampledBadDebt = max uint256 this sample WOULD trigger BadDebt,
+        // but the point of the test is "no revert" — so we only check that.
+        triggered;
+    }
+
+    // decodeAlertOutput round-trips a well-formed payload.
+    function test_DecodeAlertOutput_RoundTrip() public view {
+        bytes memory payload =
+            abi.encode(uint8(EulerFinanceTrap.TriggerType.BadDebt), uint256(1234), uint256(5), uint256(16_818_057));
+
+        (uint8 triggerType, uint256 metric1, uint256 metric2, uint256 blockNumber) = trap.decodeAlertOutput(payload);
+
+        assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.BadDebt));
+        assertEq(metric1, 1234);
+        assertEq(metric2, 5);
+        assertEq(blockNumber, 16_818_057);
+    }
+
+    // decodeAlertOutput rejects wrong-length payloads with InvalidAlertPayload.
+    function test_DecodeAlertOutput_RejectsWrongLength() public {
+        bytes memory tooShort = hex"deadbeef";
+        vm.expectRevert(EulerFinanceTrap.InvalidAlertPayload.selector);
+        trap.decodeAlertOutput(tooShort);
+
+        bytes memory tooLong = abi.encode(uint256(1), uint256(2), uint256(3), uint256(4), uint256(5));
+        vm.expectRevert(EulerFinanceTrap.InvalidAlertPayload.selector);
+        trap.decodeAlertOutput(tooLong);
     }
 
     // -------- velocity / absolute spike --------

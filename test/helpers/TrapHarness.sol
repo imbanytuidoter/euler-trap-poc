@@ -60,9 +60,9 @@ abstract contract TrapHarness is Test {
                 blockNumber: block.number > 5 ? block.number - 5 : 0,
                 sampledBadDebt: 0,
                 unhealthyAccountCount: 0,
-                reservesReadOk: true,
-                borrowsReadOk: true,
-                accountReadsOk: true
+                reservesReadOk: 1,
+                borrowsReadOk: 1,
+                accountReadsOk: 1
             })
         );
     }
@@ -75,9 +75,9 @@ abstract contract TrapHarness is Test {
                 blockNumber: block.number > 5 ? block.number - 5 : 0,
                 sampledBadDebt: 0,
                 unhealthyAccountCount: 0,
-                reservesReadOk: true,
-                borrowsReadOk: true,
-                accountReadsOk: true
+                reservesReadOk: 1,
+                borrowsReadOk: 1,
+                accountReadsOk: 1
             })
         );
     }

@@ -14,6 +14,12 @@ import "./interfaces/IEulerMarket.sol";
 /// - It detects bad debt only across accounts discovered from recent event logs.
 /// - It does not claim to interrupt an already-atomic transaction during execution.
 /// - It can fire a response as soon as a broken invariant becomes observable.
+///
+/// Encoding note: CollectOutput uses uint256 for the read-ok flags instead of
+/// bool. `abi.decode(..., bool)` reverts on any word whose value is not 0 or 1,
+/// which means a same-length-but-non-canonical sample could revert the trap
+/// outside our own error paths. uint256 flags treat any non-zero as "ok" and
+/// can absorb arbitrary input without reverting.
 contract EulerFinanceTrap is Trap {
     // Real Euler v1 markets contract on Ethereum mainnet (pre-exploit).
     // Tests etch MockEulerMarket bytecode at this address.
@@ -25,15 +31,19 @@ contract EulerFinanceTrap is Trap {
 
     uint256 private constant BPS = 10_000;
     uint256 private constant MAX_ACCOUNTS = 32;
-    // CollectOutput abi-encodes to 8 fields × 32 bytes (5 uint256 + 3 bool,
-    // each padded to a full word).
-    uint256 private constant COLLECT_OUTPUT_MIN_SIZE = 8 * 32;
+    // CollectOutput abi-encodes to exactly 8 fields × 32 bytes.
+    uint256 private constant COLLECT_OUTPUT_SIZE = 8 * 32;
+    // shouldRespond / shouldAlert payloads are exactly 4 fields × 32 bytes.
+    uint256 private constant ALERT_PAYLOAD_SIZE = 4 * 32;
 
     bytes32 private constant DEPOSIT_SIG = keccak256("Deposit(address,uint256)");
     bytes32 private constant BORROW_SIG = keccak256("Borrow(address,uint256)");
     bytes32 private constant MINT_SIG = keccak256("Mint(address,uint256,uint256)");
     bytes32 private constant DONATE_SIG = keccak256("DonateToReserves(address,uint256)");
     bytes32 private constant LIQUIDATE_SIG = keccak256("Liquidate(address,address,uint256,uint256,uint256)");
+
+    uint256 private constant FLAG_FALSE = 0;
+    uint256 private constant FLAG_TRUE = 1;
 
     /// @notice Trigger categories. ReadFailureAlertOnly is intentionally non-actionable:
     ///         shouldRespond ignores it, shouldAlert emits it for monitoring,
@@ -46,17 +56,18 @@ contract EulerFinanceTrap is Trap {
         ReadFailureAlertOnly
     }
 
+    /// @dev Read-ok fields are uint256 (not bool) so abi.decode cannot revert
+    ///      on a same-length-but-non-canonical sample. Any non-zero value
+    ///      means "ok"; zero means "read failed".
     struct CollectOutput {
         uint256 totalReserves;
         uint256 totalBorrows;
         uint256 blockNumber;
-
         uint256 sampledBadDebt;
         uint256 unhealthyAccountCount;
-
-        bool reservesReadOk;
-        bool borrowsReadOk;
-        bool accountReadsOk;
+        uint256 reservesReadOk;
+        uint256 borrowsReadOk;
+        uint256 accountReadsOk;
     }
 
     /// @dev Fixed-size accumulator for discovered accounts. Lives in memory only.
@@ -64,6 +75,8 @@ contract EulerFinanceTrap is Trap {
         address[MAX_ACCOUNTS] accounts;
         uint256 count;
     }
+
+    error InvalidAlertPayload();
 
     constructor() {}
 
@@ -88,7 +101,7 @@ contract EulerFinanceTrap is Trap {
 
         uint256 sampledBadDebt = 0;
         uint256 unhealthyAccountCount = 0;
-        bool accountReadsOk = true;
+        uint256 accountReadsOk = FLAG_TRUE;
 
         // Bounded loop: discovered.count <= MAX_ACCOUNTS = 32. External calls
         // here are a Drosera operator's view-context shadow-fork eth_call;
@@ -107,22 +120,22 @@ contract EulerFinanceTrap is Trap {
                     unhealthyAccountCount++;
                 }
             } catch {
-                accountReadsOk = false;
+                accountReadsOk = FLAG_FALSE;
             }
         }
 
         uint256 reserves = 0;
         uint256 borrows = 0;
-        bool reservesReadOk = false;
-        bool borrowsReadOk = false;
+        uint256 reservesReadOk = FLAG_FALSE;
+        uint256 borrowsReadOk = FLAG_FALSE;
 
         try market.totalReserves() returns (uint256 r) {
             reserves = r;
-            reservesReadOk = true;
+            reservesReadOk = FLAG_TRUE;
         } catch {}
         try market.totalBorrows() returns (uint256 b) {
             borrows = b;
-            borrowsReadOk = true;
+            borrowsReadOk = FLAG_TRUE;
         } catch {}
 
         return abi.encode(
@@ -151,7 +164,7 @@ contract EulerFinanceTrap is Trap {
         CollectOutput memory base = abi.decode(data[data.length - 1], (CollectOutput));
 
         // Read failure → no auto-pause. shouldAlert handles it instead.
-        if (!curr.reservesReadOk || !curr.borrowsReadOk || !curr.accountReadsOk) {
+        if (curr.reservesReadOk == 0 || curr.borrowsReadOk == 0 || curr.accountReadsOk == 0) {
             return (false, bytes(""));
         }
 
@@ -208,11 +221,27 @@ contract EulerFinanceTrap is Trap {
 
         CollectOutput memory curr = abi.decode(data[0], (CollectOutput));
 
-        if (!curr.reservesReadOk || !curr.borrowsReadOk || !curr.accountReadsOk) {
+        if (curr.reservesReadOk == 0 || curr.borrowsReadOk == 0 || curr.accountReadsOk == 0) {
             return (true, abi.encode(uint8(TriggerType.ReadFailureAlertOnly), uint256(0), uint256(0), curr.blockNumber));
         }
 
         return (false, bytes(""));
+    }
+
+    /// @notice Decodes a typed alert/response payload for off-chain consumers.
+    /// @dev Reverts with InvalidAlertPayload on wrong length before attempting
+    ///      abi.decode. The first word is decoded as uint256 and then
+    ///      narrowed to uint8 manually, so a same-length-but-non-canonical
+    ///      uint8 word cannot revert outside our own error path.
+    function decodeAlertOutput(bytes calldata payload)
+        external
+        pure
+        returns (uint8 triggerType, uint256 metric1, uint256 metric2, uint256 blockNumber)
+    {
+        if (payload.length != ALERT_PAYLOAD_SIZE) revert InvalidAlertPayload();
+        uint256 rawTriggerType;
+        (rawTriggerType, metric1, metric2, blockNumber) = abi.decode(payload, (uint256, uint256, uint256, uint256));
+        triggerType = uint8(rawTriggerType);
     }
 
     // ---------- internal helpers ----------
@@ -250,8 +279,10 @@ contract EulerFinanceTrap is Trap {
         return discovered;
     }
 
+    /// @dev Exact-length check. abi.decode of all-uint256 fields from a
+    ///      buffer of exactly this size cannot revert on field content.
     function _validEncodedSample(bytes calldata sample) internal pure returns (bool) {
-        return sample.length >= COLLECT_OUTPUT_MIN_SIZE;
+        return sample.length == COLLECT_OUTPUT_SIZE;
     }
 
     function _addressFromTopic(bytes32 topic) internal pure returns (address) {
