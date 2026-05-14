@@ -29,6 +29,7 @@ contract EulerPauseResponse {
     error UnknownTriggerType(uint8 triggerType);
     error InvalidPayload();
     error ZeroAddress();
+    error PauseDidNotTakeEffect();
 
     constructor(address market, address trapManager) {
         if (market == address(0) || trapManager == address(0)) revert ZeroAddress();
@@ -59,6 +60,15 @@ contract EulerPauseResponse {
         // we want the event to mark a successful pause, not an attempted one.
         // slither-disable-next-line reentrancy-events
         IEulerMarket(EULER_MARKET).pause();
+
+        // Post-condition: confirm pause() actually took effect. If the target
+        // silently no-ops (proxy upgrade, governance change, mis-wired clone),
+        // we surface that as PauseDidNotTakeEffect rather than emit a misleading
+        // ProtocolPaused event.
+        if (!IEulerMarket(EULER_MARKET).paused()) {
+            revert PauseDidNotTakeEffect();
+        }
+
         emit ProtocolPaused(triggerType, metric1, metric2, atBlock);
     }
 }

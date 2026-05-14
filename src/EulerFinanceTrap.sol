@@ -28,6 +28,8 @@ contract EulerFinanceTrap is Trap {
     uint256 public constant RESERVE_SPIKE_BPS = 5_000; // 50%
     uint256 public constant ABSOLUTE_RESERVE_SPIKE = 1_000_000e18; // 1M units
     uint256 public constant MIN_SAMPLE_SIZE = 5;
+    uint256 public constant MAX_SAMPLE_SIZE = 10;
+    uint256 public constant MAX_WINDOW_BLOCKS = 32;
 
     uint256 private constant BPS = 10_000;
     uint256 private constant MAX_ACCOUNTS = 32;
@@ -155,16 +157,30 @@ contract EulerFinanceTrap is Trap {
     /// @notice Auto-pause path. Read failures are intentionally ignored here —
     ///         a failed read is alert-only material via shouldAlert(), not
     ///         grounds to halt the protocol.
+    ///
+    /// Order of checks is deliberate:
+    /// 1. Length and per-sample validity (cheap structural rejection).
+    /// 2. Window validity (block ordering + span).
+    /// 3. Current-sample read flags — a degraded current sample cannot fire
+    ///    an auto-pause; it routes through shouldAlert() instead.
+    /// 4. BadDebt — depends only on current sampledBadDebt.
+    /// 5. Base-sample read flags — must be set before consulting base.
+    ///    Without this, a failed base read looks like a zero-baseline and can
+    ///    trigger a false AbsoluteReserveSpike.
+    /// 6. ReserveVelocity / AbsoluteReserveSpike — both consult base.
     function shouldRespond(bytes[] calldata data) external pure override returns (bool, bytes memory) {
-        if (data.length < MIN_SAMPLE_SIZE) return (false, bytes(""));
+        if (data.length < MIN_SAMPLE_SIZE || data.length > MAX_SAMPLE_SIZE) {
+            return (false, bytes(""));
+        }
         if (!_validEncodedSample(data[0])) return (false, bytes(""));
         if (!_validEncodedSample(data[data.length - 1])) return (false, bytes(""));
 
         CollectOutput memory curr = abi.decode(data[0], (CollectOutput));
         CollectOutput memory base = abi.decode(data[data.length - 1], (CollectOutput));
 
-        // Read failure → no auto-pause. shouldAlert handles it instead.
-        if (curr.reservesReadOk == 0 || curr.borrowsReadOk == 0 || curr.accountReadsOk == 0) {
+        if (!_validWindow(curr, base)) return (false, bytes(""));
+
+        if (!_currentReadsOk(curr)) {
             return (false, bytes(""));
         }
 
@@ -175,6 +191,12 @@ contract EulerFinanceTrap is Trap {
                     uint8(TriggerType.BadDebt), curr.sampledBadDebt, curr.unhealthyAccountCount, curr.blockNumber
                 )
             );
+        }
+
+        // Velocity / spike checks require a trusted base sample. If the base
+        // reads were degraded, treat base aggregates as unknown and bail.
+        if (!_baseReadsOk(base)) {
+            return (false, bytes(""));
         }
 
         if (base.totalReserves > 0 && curr.totalReserves > base.totalReserves) {
@@ -221,7 +243,7 @@ contract EulerFinanceTrap is Trap {
 
         CollectOutput memory curr = abi.decode(data[0], (CollectOutput));
 
-        if (curr.reservesReadOk == 0 || curr.borrowsReadOk == 0 || curr.accountReadsOk == 0) {
+        if (!_currentReadsOk(curr)) {
             return (true, abi.encode(uint8(TriggerType.ReadFailureAlertOnly), uint256(0), uint256(0), curr.blockNumber));
         }
 
@@ -283,6 +305,33 @@ contract EulerFinanceTrap is Trap {
     ///      buffer of exactly this size cannot revert on field content.
     function _validEncodedSample(bytes calldata sample) internal pure returns (bool) {
         return sample.length == COLLECT_OUTPUT_SIZE;
+    }
+
+    /// @dev Window validation:
+    ///      - Both samples must carry a non-zero block number (a zero-encoded
+    ///        sample would otherwise look like a chain-genesis ghost).
+    ///      - `curr` must strictly follow `base` (newest-first ordering).
+    ///      - Span between samples must not exceed MAX_WINDOW_BLOCKS so an
+    ///        old stale `base` cannot be paired with a fresh `curr`.
+    function _validWindow(CollectOutput memory curr, CollectOutput memory base) internal pure returns (bool) {
+        if (curr.blockNumber == 0 || base.blockNumber == 0) return false;
+        if (curr.blockNumber <= base.blockNumber) return false;
+        if (curr.blockNumber - base.blockNumber > MAX_WINDOW_BLOCKS) return false;
+        return true;
+    }
+
+    /// @dev All three current-sample read flags must be set for any
+    ///      response-firing trigger.
+    function _currentReadsOk(CollectOutput memory out) internal pure returns (bool) {
+        return out.reservesReadOk == FLAG_TRUE && out.borrowsReadOk == FLAG_TRUE && out.accountReadsOk == FLAG_TRUE;
+    }
+
+    /// @dev Base sample only needs the aggregate reads (totalReserves,
+    ///      totalBorrows) to support velocity / absolute-spike comparisons.
+    ///      Account-level reads are not consulted on the base side, so
+    ///      accountReadsOk is not required here.
+    function _baseReadsOk(CollectOutput memory out) internal pure returns (bool) {
+        return out.reservesReadOk == FLAG_TRUE && out.borrowsReadOk == FLAG_TRUE;
     }
 
     function _addressFromTopic(bytes32 topic) internal pure returns (address) {

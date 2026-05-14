@@ -211,6 +211,97 @@ contract EulerTrapEdgeCases is TrapHarness {
         trap.decodeAlertOutput(tooLong);
     }
 
+    // -------- window validation --------
+
+    // If the base sample's read flags are zero, velocity / absolute-spike checks
+    // must be suppressed. Otherwise a failed base read looks like a clean
+    // zero-baseline and can produce a false AbsoluteReserveSpike trigger.
+    function test_BaseReadFailure_DoesNotTriggerAbsoluteReserveSpike() public view {
+        EulerFinanceTrap.CollectOutput memory curr = EulerFinanceTrap.CollectOutput({
+            totalReserves: trap.ABSOLUTE_RESERVE_SPIKE(),
+            totalBorrows: 10_000_000 ether,
+            blockNumber: 105,
+            sampledBadDebt: 0,
+            unhealthyAccountCount: 0,
+            reservesReadOk: 1,
+            borrowsReadOk: 1,
+            accountReadsOk: 1
+        });
+
+        EulerFinanceTrap.CollectOutput memory base = EulerFinanceTrap.CollectOutput({
+            totalReserves: 0,
+            totalBorrows: 0,
+            blockNumber: 100,
+            sampledBadDebt: 0,
+            unhealthyAccountCount: 0,
+            reservesReadOk: 0, // failed read — must not be interpreted as zero baseline
+            borrowsReadOk: 0,
+            accountReadsOk: 1
+        });
+
+        bytes[] memory data = new bytes[](5);
+        data[0] = abi.encode(curr);
+        data[1] = abi.encode(curr);
+        data[2] = abi.encode(curr);
+        data[3] = abi.encode(curr);
+        data[4] = abi.encode(base);
+
+        (bool triggered,) = trap.shouldRespond(data);
+        assertFalse(triggered, "base read failure must suppress velocity / spike checks");
+    }
+
+    // Newest-first ordering must be enforced: curr.blockNumber > base.blockNumber.
+    // A reversed window — even with a real bad-debt sample at index 0 — must not
+    // trigger, because _validWindow rejects it before evaluation.
+    function test_InvalidWindowOrdering_DoesNotTrigger() public view {
+        EulerFinanceTrap.CollectOutput memory curr = _healthyOutput(100);
+        EulerFinanceTrap.CollectOutput memory base = _healthyOutput(105); // newer than curr
+
+        curr.sampledBadDebt = 1 ether;
+
+        bytes[] memory data = new bytes[](5);
+        data[0] = abi.encode(curr);
+        data[1] = abi.encode(curr);
+        data[2] = abi.encode(curr);
+        data[3] = abi.encode(curr);
+        data[4] = abi.encode(base);
+
+        (bool triggered,) = trap.shouldRespond(data);
+        assertFalse(triggered, "reversed-order window must not trigger");
+    }
+
+    // Window span beyond MAX_WINDOW_BLOCKS must be rejected — stale base
+    // samples cannot be paired with a fresh current sample.
+    function test_WindowSpanTooLarge_DoesNotTrigger() public view {
+        EulerFinanceTrap.CollectOutput memory curr = _healthyOutput(1000);
+        EulerFinanceTrap.CollectOutput memory base = _healthyOutput(100); // 900 blocks earlier
+
+        curr.sampledBadDebt = 1 ether;
+
+        bytes[] memory data = new bytes[](5);
+        data[0] = abi.encode(curr);
+        data[1] = abi.encode(curr);
+        data[2] = abi.encode(curr);
+        data[3] = abi.encode(curr);
+        data[4] = abi.encode(base);
+
+        (bool triggered,) = trap.shouldRespond(data);
+        assertFalse(triggered, "over-span window must not trigger");
+    }
+
+    function _healthyOutput(uint256 blockNumber) internal pure returns (EulerFinanceTrap.CollectOutput memory) {
+        return EulerFinanceTrap.CollectOutput({
+            totalReserves: 0,
+            totalBorrows: 0,
+            blockNumber: blockNumber,
+            sampledBadDebt: 0,
+            unhealthyAccountCount: 0,
+            reservesReadOk: 1,
+            borrowsReadOk: 1,
+            accountReadsOk: 1
+        });
+    }
+
     // -------- velocity / absolute spike --------
 
     function test_ZeroBaseline_AbsoluteReserveSpike_Triggers() public {

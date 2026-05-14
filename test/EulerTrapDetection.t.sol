@@ -265,6 +265,20 @@ contract EulerTrapDetection is TrapHarness {
         response.respond(oversized);
     }
 
+    // [11] If pause() silently no-ops (proxy upgrade, governance change,
+    //      mis-wired clone), respond() must revert with PauseDidNotTakeEffect
+    //      instead of emitting a misleading ProtocolPaused event.
+    function test_ResponseRejects_PauseDidNotTakeEffect() public {
+        // Make paused() return false always, and pause() a no-op. Together
+        // these simulate a target whose pause() does not flip the flag.
+        vm.mockCall(eulerAddr, abi.encodeWithSelector(IEulerMarket.paused.selector), abi.encode(false));
+        vm.mockCall(eulerAddr, abi.encodeWithSelector(IEulerMarket.pause.selector), "");
+
+        vm.expectRevert(EulerPauseResponse.PauseDidNotTakeEffect.selector);
+        vm.prank(trapManager);
+        response.respond(_validBadDebtPayload());
+    }
+
     function _validBadDebtPayload() internal pure returns (bytes memory) {
         return abi.encode(uint8(EulerFinanceTrap.TriggerType.BadDebt), uint256(1e18), uint256(1), uint256(16_818_057));
     }
