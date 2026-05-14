@@ -8,7 +8,6 @@ import "../interfaces/IEulerMarket.sol";
 // Bad debt is derived from position accounting, not injected via flags.
 
 contract MockEulerMarket is IEulerMarket {
-
     struct Position {
         uint256 eTokens;
         uint256 dTokens;
@@ -18,19 +17,24 @@ contract MockEulerMarket is IEulerMarket {
 
     uint256 private _totalBorrows;
     uint256 private _totalReserves;
-    bool    private _paused;
+    bool private _paused;
 
     // Euler v1 risk parameters (from on-chain deployment, pre-exploit)
-    uint256 public constant COLLATERAL_FACTOR_BPS = 7500;   // 75%
-    uint256 public constant LIQUIDATION_BONUS_BPS = 2000;   // 20%
+    uint256 public constant COLLATERAL_FACTOR_BPS = 7500; // 75%
+    uint256 public constant LIQUIDATION_BONUS_BPS = 2000; // 20%
     uint256 private constant BPS = 10_000;
 
     event Deposit(address indexed account, uint256 amount);
     event Borrow(address indexed account, uint256 amount);
     event Mint(address indexed account, uint256 eAmount, uint256 dAmount);
     event DonateToReserves(address indexed account, uint256 amount);
-    event Liquidate(address indexed liquidator, address indexed violator,
-                    uint256 repaid, uint256 collateralTaken, uint256 badDebtCreated);
+    event Liquidate(
+        address indexed liquidator,
+        address indexed violator,
+        uint256 repaid,
+        uint256 collateralTaken,
+        uint256 badDebtCreated
+    );
     event Withdraw(address indexed account, uint256 eTokenAmount);
     event Redeem(address indexed account, uint256 eTokenAmount);
     event Transfer(address indexed from, address indexed to, uint256 eTokenAmount);
@@ -78,7 +82,7 @@ contract MockEulerMarket is IEulerMarket {
         require(positions[msg.sender].eTokens >= amount, "MockEuler: insufficient eTokens");
 
         positions[msg.sender].eTokens -= amount;
-        _totalReserves                += amount;
+        _totalReserves += amount;
 
         // NO solvency check — this is the bug
         emit DonateToReserves(msg.sender, amount);
@@ -95,18 +99,15 @@ contract MockEulerMarket is IEulerMarket {
 
         uint256 collateralOwed = repayAmount * (BPS + LIQUIDATION_BONUS_BPS) / BPS;
         uint256 collateralAvailable = positions[violator].eTokens;
-        uint256 collateralTransferred = collateralOwed <= collateralAvailable
-            ? collateralOwed
-            : collateralAvailable;
+        uint256 collateralTransferred = collateralOwed <= collateralAvailable ? collateralOwed : collateralAvailable;
 
         positions[violator].dTokens -= repayAmount;
         _totalBorrows -= repayAmount;
         positions[violator].eTokens -= collateralTransferred;
         positions[msg.sender].eTokens += collateralTransferred;
 
-        uint256 badDebtCreated = positions[violator].dTokens > 0 &&
-                                 positions[violator].eTokens == 0
-            ? positions[violator].dTokens : 0;
+        uint256 badDebtCreated =
+            positions[violator].dTokens > 0 && positions[violator].eTokens == 0 ? positions[violator].dTokens : 0;
 
         emit Liquidate(msg.sender, violator, repayAmount, collateralTransferred, badDebtCreated);
     }
@@ -141,16 +142,26 @@ contract MockEulerMarket is IEulerMarket {
         require(eTokenAmount > 0, "zero transfer");
         require(positions[msg.sender].eTokens >= eTokenAmount, "MockEuler: insufficient eTokens");
         positions[msg.sender].eTokens -= eTokenAmount;
-        positions[to].eTokens          += eTokenAmount;
+        positions[to].eTokens += eTokenAmount;
         emit Transfer(msg.sender, to, eTokenAmount);
     }
 
-    function totalBorrows() external view override returns (uint256) { return _totalBorrows; }
-    function totalReserves() external view override returns (uint256) { return _totalReserves; }
-    function paused() external view override returns (bool) { return _paused; }
+    function totalBorrows() external view override returns (uint256) {
+        return _totalBorrows;
+    }
+
+    function totalReserves() external view override returns (uint256) {
+        return _totalReserves;
+    }
+
+    function paused() external view override returns (bool) {
+        return _paused;
+    }
 
     function getAccountLiquidity(address account)
-        external view override
+        external
+        view
+        override
         returns (uint256 collateralValue, uint256 liabilityValue)
     {
         return _accountLiquidity(account);
@@ -164,21 +175,21 @@ contract MockEulerMarket is IEulerMarket {
     // Test helper for direct verification of the donation→liquidation flow.
     // The Trap itself uses getAccountLiquidity(account) per discovered address,
     // not this aggregator.
-    function getTotalBadDebt(address[] calldata accounts)
-        external view
-        returns (uint256 badDebt)
-    {
-        for (uint256 i; i < accounts.length; i++) {
+    function getTotalBadDebt(address[] calldata accounts) external view returns (uint256 badDebt) {
+        for (uint256 i = 0; i < accounts.length; i++) {
             (uint256 col, uint256 liab) = _accountLiquidity(accounts[i]);
-            if (liab > col) { unchecked { badDebt += liab - col; } }
+            if (liab > col) {
+                badDebt += liab - col;
+            }
         }
     }
 
     function _accountLiquidity(address account)
-        internal view
+        internal
+        view
         returns (uint256 collateralValue, uint256 liabilityValue)
     {
         collateralValue = positions[account].eTokens * COLLATERAL_FACTOR_BPS / BPS;
-        liabilityValue  = positions[account].dTokens;
+        liabilityValue = positions[account].dTokens;
     }
 }

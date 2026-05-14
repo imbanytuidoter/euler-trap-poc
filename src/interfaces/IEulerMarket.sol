@@ -6,7 +6,8 @@ interface IEulerMarket {
     function totalReserves() external view returns (uint256);
 
     function getAccountLiquidity(address account)
-        external view
+        external
+        view
         returns (uint256 collateralValue, uint256 liabilityValue);
 
     function pause() external;

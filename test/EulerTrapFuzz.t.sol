@@ -5,14 +5,13 @@ import "forge-std/Test.sol";
 import "./helpers/TrapHarness.sol";
 
 contract EulerTrapFuzz is TrapHarness {
-
     address public alice = makeAddr("alice");
-    address public atk1  = makeAddr("atk1");
-    address public atk2  = makeAddr("atk2");
+    address public atk1 = makeAddr("atk1");
+    address public atk2 = makeAddr("atk2");
 
     uint256 constant ONE_M = 1_000_000 * 1e18;
-    uint256 constant CF    = 7500;
-    uint256 constant BPS   = 10_000;
+    uint256 constant CF = 7500;
+    uint256 constant BPS = 10_000;
 
     function setUp() public {
         _deployHarness();
@@ -36,10 +35,7 @@ contract EulerTrapFuzz is TrapHarness {
     }
 
     // Fuzz 1: no false positives under arbitrary normal deposits/borrows.
-    function testFuzz_NoFalsePositive_NormalBorrowAndDeposit(
-        uint256 depositAmt,
-        uint256 borrowFrac
-    ) public {
+    function testFuzz_NoFalsePositive_NormalBorrowAndDeposit(uint256 depositAmt, uint256 borrowFrac) public {
         depositAmt = bound(depositAmt, 1e18, 1_000 * ONE_M);
         borrowFrac = bound(borrowFrac, 0, 7_400); // strictly below CF
 
@@ -51,15 +47,12 @@ contract EulerTrapFuzz is TrapHarness {
         if (borrowAmt > 0) euler.borrow(borrowAmt);
         vm.stopPrank();
 
-        (bool triggered, ) = trap.shouldRespond(_fiveSampleWindow(baseline));
+        (bool triggered,) = trap.shouldRespond(_fiveSampleWindow(baseline));
         assertFalse(triggered, "must not trigger on normal activity");
     }
 
     // Fuzz 2: trigger fires for any meaningful bad debt amount.
-    function testFuzz_TriggerOnBadDebt(
-        uint256 depositAmt,
-        uint256 donateAmt
-    ) public {
+    function testFuzz_TriggerOnBadDebt(uint256 depositAmt, uint256 donateAmt) public {
         depositAmt = bound(depositAmt, 10 * ONE_M, 500 * ONE_M);
         uint256 borrowAmt = depositAmt * CF / BPS;
         uint256 minDonate = depositAmt / 3 + 1;
@@ -88,7 +81,7 @@ contract EulerTrapFuzz is TrapHarness {
         (bool triggered, bytes memory payload) = trap.shouldRespond(_fiveSampleWindow(baseline));
         assertTrue(triggered, "must trigger when bad debt exists");
 
-        (uint8 triggerType, , , ) = abi.decode(payload, (uint8, uint256, uint256, uint256));
+        (uint8 triggerType,,,) = abi.decode(payload, (uint8, uint256, uint256, uint256));
         assertEq(triggerType, uint8(EulerFinanceTrap.TriggerType.BadDebt));
     }
 
@@ -108,7 +101,7 @@ contract EulerTrapFuzz is TrapHarness {
         euler.donateToReserves(donationAmount);
         vm.stopPrank();
 
-        (bool triggered, ) = trap.shouldRespond(_fiveSampleWindow(baseline));
+        (bool triggered,) = trap.shouldRespond(_fiveSampleWindow(baseline));
 
         if (donationBps >= 5_000) {
             assertTrue(triggered, "must trigger at >= 50% reserve spike with borrow growth");
@@ -128,7 +121,7 @@ contract EulerTrapFuzz is TrapHarness {
             w[i] = trap.collect();
         }
 
-        (bool triggered, ) = trap.shouldRespond(w);
+        (bool triggered,) = trap.shouldRespond(w);
 
         if (windowSize < trap.MIN_SAMPLE_SIZE()) {
             assertFalse(triggered, "< MIN_SAMPLE_SIZE must not trigger");
@@ -150,7 +143,7 @@ contract EulerTrapFuzz is TrapHarness {
         euler.donateToReserves(10 * ONE_M); // 10M < 1M e18 threshold? need check
         vm.stopPrank();
 
-        (bool triggered, ) = trap.shouldRespond(_fiveSampleWindow(baseline));
+        (bool triggered,) = trap.shouldRespond(_fiveSampleWindow(baseline));
         // 10M units == 10_000_000e18 which IS >= ABSOLUTE_RESERVE_SPIKE (1M e18)
         // So this DOES trigger AbsoluteReserveSpike. That's correct.
         assertTrue(triggered, "10M reserve donation from zero baseline must trigger absolute spike");
